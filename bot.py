@@ -1,8 +1,12 @@
-import asyncio
+# -*- coding: utf-8 -*-
 import json
 import os
+import sys
+import time
+import urllib.request
+import urllib.parse
+import asyncio
 import aiohttp
-import requests
 import gc
 import traceback
 
@@ -13,32 +17,27 @@ LLM_API_KEY = os.environ.get("LLM_API_KEY", "sk-17e91de636bf49a68eb632cf758fbae1
 LLM_API_URL = "https://api.openai.com/v1/chat/completions"
 LLM_MODEL = "gpt-3.5-turbo"
 
-_cached_token = None
-_cached_expire = 0
-
 def get_qq_bot_token():
-    global _cached_token, _cached_expire
-    import time
-    now = time.time()
-    if _cached_token and now < _cached_expire - 60:
-        return _cached_token
+    print("正在向 QQ 官方请求 Access Token...")
     try:
-        print("正在向 QQ 官方请求 Access Token...")
         url = "https://bots.qq.com/app/getAppAccessToken"
-        headers = {"Content-Type": "application/json"}
-        payload = {"appId": str(QQ_APPID), "clientSecret": str(QQ_APPSECRET)}
-        res = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
-        print(f"HTTP 状态码: {res.status_code}")
-        print(f"返回内容: {res.text}")
-        data = res.json()
-        if data.get("code") == 0:
-            _cached_token = data["access_token"]
-            _cached_expire = now + int(data.get("expires_in", 7200))
-            print(f"Token 获取成功: {_cached_token[:15]}...")
-            return _cached_token
-        else:
-            print(f"Token 获取失败: code={data.get('code')}, message={data.get('message')}")
-            return None
+        payload = {"appId": str(QQ_APPID), "clientSecret": QQ_APPSECRET}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = response.read().decode('utf-8')
+            print("服务器原始返回:", result)
+            data = json.loads(result)
+            if data.get("code") == 0:
+                token = data["access_token"]
+                print(f"Token 获取成功: {token[:15]}...")
+                return token
+            else:
+                print(f"Token 获取失败: {data}")
+                return None
     except Exception as e:
         print(f"请求 Token 时发生异常: {e}")
         traceback.print_exc()
@@ -48,8 +47,14 @@ def call_llm(prompt):
     try:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"}
         payload = {"model": LLM_MODEL, "messages": [{"role": "user", "content": prompt}]}
-        res = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=10)
-        return res.json()['choices'][0]['message']['content']
+        req = urllib.request.Request(
+            LLM_API_URL,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = response.read().decode('utf-8')
+            return json.loads(result)['choices'][0]['message']['content']
     except Exception:
         return "我在呢！"
 
