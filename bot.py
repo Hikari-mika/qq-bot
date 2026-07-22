@@ -2,16 +2,35 @@ import asyncio
 import json
 import os
 import aiohttp
-import base64
+import requests
 import gc
 import traceback
 
-QQ_APPID = os.environ.get("QQ_APPID", "")
-QQ_APPSECRET = os.environ.get("QQ_APPSECRET", "") 
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+QQ_APPID = os.environ.get("QQ_APPID", "1904762056")
+QQ_APPSECRET = os.environ.get("QQ_APPSECRET", "tGe2RqGg7Y0SvPtOuQxV3cCmNzbEsWBq")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "sk-17e91de636bf49a68eb632cf758fbae1")
 
 LLM_API_URL = "https://api.openai.com/v1/chat/completions"
 LLM_MODEL = "gpt-3.5-turbo"
+
+def get_qq_bot_token():
+    try:
+        print("正在向 QQ 官方请求 Access Token...")
+        url = "https://bots.qq.com/app/getAppAccessToken"
+        headers = {"Content-Type": "application/json"}
+        payload = {"appId": QQ_APPID, "clientSecret": QQ_APPSECRET}
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        data = res.json()
+        if data.get("code") == 0:
+            token = data["access_token"]
+            print(f"Token 获取成功: {token[:15]}...")
+            return token
+        else:
+            print(f"Token 获取失败，官方返回: {data}")
+            return None
+    except Exception as e:
+        print(f"请求 Token 时发生异常: {e}")
+        return None
 
 def call_llm(prompt):
     try:
@@ -25,28 +44,15 @@ def call_llm(prompt):
 def clear_memory():
     gc.collect()
 
-# 新增：生成正确的鉴权 Token
-def generate_token(app_id, app_secret):
-    # 官方标准格式通常是 Base64 编码的 "AppID:AppSecret"
-    # 但在某些沙箱环境或简易接入中，直接拼接 "QQBot AppID.AppSecret" 也可能有效
-    # 我们先尝试最常用的 Base64 格式
-    auth_str = f"{app_id}:{app_secret}"
-    token = base64.b64encode(auth_str.encode()).decode()
-    return f"QQBot {token}"
-
 async def run_bot():
-    # 修改：使用生成的 Token
-    token = generate_token(QQ_APPID, QQ_APPSECRET)
-    
-    headers = {
-        "Authorization": token,
-        "X-Union-Appid": QQ_APPID
-    }
-    
+    token_str = get_qq_bot_token()
+    if not token_str:
+        print("无法获取 Token，程序退出")
+        return
+    token = f"QQBot {token_str}"
+    headers = {"Authorization": token, "X-Union-Appid": QQ_APPID}
     ws_url = "wss://sandbox.api.sgroup.qq.com/websocket"
     print("--- Bot 启动 ---")
-    print(f"使用的 Token: {token[:30]}...") # 打印前30位检查格式
-    
     while True:
         try:
             print(f"连接网关: {ws_url}")
@@ -56,87 +62,60 @@ async def run_bot():
                     print("WebSocket 已连接")
                     heartbeat_interval = 41250
                     heartbeat_task = None
-                    
                     async def send_heartbeat():
-                        nonlocal heartbeat_interval
                         while True:
                             await asyncio.sleep(heartbeat_interval / 1000)
                             try:
                                 await ws.send_str(json.dumps({"op": 1, "d": None}))
                             except:
                                 break
-
                     async for msg in ws:
                         try:
                             if msg.type != aiohttp.WSMsgType.TEXT:
                                 continue
-                            
                             data = json.loads(msg.data)
                             op = data.get("op")
-
                             if op == 10:
                                 heartbeat_interval = data["d"]["heartbeat_interval"]
-                                print(f"📡 收到 Hello, 心跳间隔: {heartbeat_interval}ms")
-                                
-                                # 发送鉴权
-                                await ws.send_str(json.dumps({
-                                    "op": 2, 
-                                    "d": {
-                                        "token": token, 
-                                        "intents": (1 << 9) | (1 << 0), 
-                                        "shard": [0, 1]
-                                    }
-                                }))
-                                print("🚀 鉴权已发送")
-                                heartbeat_task = asyncio.create_task(send_heartbeat())
-
+                                print(f"收到 Hello, 心跳间隔: {heartbeat_interval}ms")
+                                await ws.send_str(json.dumps({"op": 2, "d": {"token": token, "intents": (1 << 9) | (1 << 0), "shard": [0, 1]}}))
+                                print("鉴权已发送")
                             elif op == 0:
                                 t = data.get("t")
                                 d = data.get("d", {})
-                                
-                                if t in ("GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"):
+                                if t == "READY":
+                                    print(f"鉴权成功！机器人已上线！")
+                                    heartbeat_task = asyncio.create_task(send_heartbeat())
+                                elif t in ("GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"):
                                     content = d.get("content", "").strip()
-                                    msg_id = d.get("id")
-                                    print(f"💬 收到消息: {content[:30]}...")
-                                    
+                                    print(f"收到消息: {content[:30]}...")
                                     reply = call_llm(content)
-                                    
                                     channel_id = d.get("channel_id", "")
                                     user_openid = d.get("author", {}).get("user_openid", "")
                                     if t == "GROUP_AT_MESSAGE_CREATE":
                                         post_url = f"https://api.sgroup.qq.com/v2/channels/{channel_id}/messages"
                                     else:
                                         post_url = f"https://api.sgroup.qq.com/v2/users/@me/channels/{user_openid}/messages"
-                                    
-                                    body = {"content": reply, "msg_id": msg_id}
+                                    body = {"content": reply}
                                     try:
                                         async with aiohttp.ClientSession() as s:
-                                            async with s.post(post_url, headers=headers, json=body, timeout=10) as r:
-                                                if r.status in (200, 204):
-                                                    print("📤 回复成功")
+                                            await s.post(post_url, headers=headers, json=body, timeout=10)
+                                            print("回复成功")
                                     except Exception as e:
-                                        print(f"❌ 回复异常: {e}")
-
+                                        print(f"回复异常: {e}")
                             elif op == 7:
-                                print("⚠️ 服务端要求重连")
+                                print("服务端要求重连")
                                 break
-                                
                             elif op == 9:
-                                print(f"❌❌❌ 收到 Opcode 9 (鉴权失败)! 数据: {data}")
-                                # 如果这里报错，说明 Token 格式还是不对，或者沙箱环境没配对
+                                print(f"鉴权失败! 数据: {data}")
                                 break
-
                         except Exception as loop_err:
-                            print(f"⚠️ 消息处理异常: {loop_err}")
-                            traceback.print_exc()
-                    
+                            print(f"消息处理异常: {loop_err}")
                     if heartbeat_task:
                         heartbeat_task.cancel()
-
         except Exception as outer_err:
-            print(f"🔥 发生严重错误: {outer_err}")
+            print(f"发生严重错误: {outer_err}")
             traceback.print_exc()
-        
         print("5秒后尝试重连...")
         await asyncio.sleep(5)
 
@@ -146,4 +125,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("程序已停止")
     except Exception as e:
-        print(f"无法运行的错误: {e}")
+        print(f"启动失败: {e}")
+        traceback.print_exc()
