@@ -27,7 +27,7 @@ def get_access_token():
     res = requests.post(url, json=payload)
     return res.json().get("access_token", "")
 
-async def main():
+async def run_bot():
     token = get_access_token()
     if not token:
         print("获取 token 失败")
@@ -52,14 +52,16 @@ async def main():
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(ws_url, headers=headers) as ws:
             print("WebSocket 已连接")
-            heartbeat_interval = 45000
-            identified = False
+            heartbeat_interval = 41250
             heartbeat_task = None
 
             async def send_heartbeat():
                 while True:
                     await asyncio.sleep(heartbeat_interval / 1000)
-                    await ws.send_str(json.dumps({"op": 1, "d": None}))
+                    try:
+                        await ws.send_str(json.dumps({"op": 1, "d": None}))
+                    except:
+                        break
 
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
@@ -74,12 +76,12 @@ async def main():
                         "op": 2,
                         "d": {
                             "token": f"QQBot {token}",
+                            "intents": (1 << 9) | (1 << 0),
                             "shard": [0, 1]
                         }
                     }))
-                    identified = True
-                    heartbeat_task = asyncio.create_task(send_heartbeat())
                     print("鉴权已发送")
+                    heartbeat_task = asyncio.create_task(send_heartbeat())
 
                 elif op == 0:
                     t = data.get("t")
@@ -99,7 +101,7 @@ async def main():
                         try:
                             async with aiohttp.ClientSession() as s:
                                 async with s.post(post_url, headers=headers, json=body) as r:
-                                    if r.status == 204:
+                                    if r.status in (200, 204):
                                         print(f"回复成功: {reply[:20]}...")
                                     else:
                                         print(f"回复失败: {r.status}")
@@ -107,11 +109,20 @@ async def main():
                             print(f"回复异常: {e}")
 
                 elif op == 7:
-                    print("要求重连")
+                    print("服务端要求重连")
                     break
 
             if heartbeat_task:
                 heartbeat_task.cancel()
+
+async def main():
+    while True:
+        try:
+            await run_bot()
+        except Exception as e:
+            print(f"连接异常: {e}")
+        print("5秒后重连...")
+        await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
