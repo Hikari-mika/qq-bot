@@ -64,7 +64,7 @@ async def main():
 
             async def identify():
                 # 2 号事件：鉴权
-                await ws.send(json.dumps({
+                await ws.send_str(json.dumps({...}))
                     "op": 2,
                     "d": {
                         "token": f"QQBot {token}",
