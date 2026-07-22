@@ -21,40 +21,19 @@ def call_llm(prompt):
         print(f"LLM error: {e}")
         return "抱歉，我现在有点累，稍后再试试吧。"
 
-def get_access_token():
-    url = "https://bots.qq.com/app/getAppAccessToken"
-    payload = {"appId": QQ_APPID, "clientSecret": QQ_APPSECRET}
-    res = requests.post(url, json=payload)
-    return res.json().get("access_token", "")
-
 async def run_bot():
-    token = get_access_token()
-    if not token:
-        print("获取 token 失败")
-        return
-
+    token = f"QQBot {QQ_APPID}"
     headers = {
-        "Authorization": f"QQBot {token}",
+        "Authorization": token,
         "X-Union-Appid": QQ_APPID
     }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get("https://api.sgroup.qq.com/gateway", headers=headers) as resp:
-            data = await resp.json()
-            ws_url = data.get("url", "")
-
-    if not ws_url:
-        print("获取网关失败")
-        return
-
+    ws_url = "wss://sandbox.api.sgroup.qq.com/websocket"
     print(f"连接网关: {ws_url}")
-
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(ws_url, headers=headers) as ws:
             print("WebSocket 已连接")
             heartbeat_interval = 41250
             heartbeat_task = None
-
             async def send_heartbeat():
                 while True:
                     await asyncio.sleep(heartbeat_interval / 1000)
@@ -62,27 +41,24 @@ async def run_bot():
                         await ws.send_str(json.dumps({"op": 1, "d": None}))
                     except:
                         break
-
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
-                    break
+                    continue
                 data = json.loads(msg.data)
                 op = data.get("op")
-
                 if op == 10:
                     heartbeat_interval = data["d"]["heartbeat_interval"]
                     print(f"收到 Hello, 心跳间隔: {heartbeat_interval}ms")
                     await ws.send_str(json.dumps({
                         "op": 2,
                         "d": {
-                            "token": f"QQBot {token}",
+                            "token": token,
                             "intents": (1 << 9) | (1 << 0),
                             "shard": [0, 1]
                         }
                     }))
                     print("鉴权已发送")
                     heartbeat_task = asyncio.create_task(send_heartbeat())
-
                 elif op == 0:
                     t = data.get("t")
                     d = data.get("d", {})
@@ -107,11 +83,9 @@ async def run_bot():
                                         print(f"回复失败: {r.status}")
                         except Exception as e:
                             print(f"回复异常: {e}")
-
                 elif op == 7:
                     print("服务端要求重连")
                     break
-
             if heartbeat_task:
                 heartbeat_task.cancel()
 
