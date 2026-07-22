@@ -39,10 +39,9 @@ async def run_bot():
     }
 
     async with aiohttp.ClientSession() as session:
-    # 注意：这里把网址改成了 sandbox.api.sgroup.qq.com/gateway/bot
-    async with session.get("https://sandbox.api.sgroup.qq.com/gateway/bot", headers=headers) as resp:
-        data = await resp.json()
-        ws_url = data.get("url", "")
+        async with session.get("https://api.sgroup.qq.com/gateway", headers=headers) as resp:
+            data = await resp.json()
+            ws_url = data.get("url", "")
 
     if not ws_url:
         print("获取网关失败")
