@@ -2,65 +2,63 @@ import asyncio
 import json
 import os
 import aiohttp
-import requests
+import base64
 import gc
 import traceback
 
 QQ_APPID = os.environ.get("QQ_APPID", "")
-# 如果鉴权失败，可以尝试把 QQ_APPID 前面加上 Bearer 试试
-# QQ_APPID = "Bearer " + os.environ.get("QQ_APPID", "") 
+QQ_APPSECRET = os.environ.get("QQ_APPSECRET", "") 
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+
+LLM_API_URL = "https://api.openai.com/v1/chat/completions"
+LLM_MODEL = "gpt-3.5-turbo"
 
 def call_llm(prompt):
-    # 为了防止 OpenAI 报错导致整个机器人挂掉，这里也加上保护伞
     try:
-        # 如果你还没有 OpenAI Key，把下面的代码注释掉，直接 return 一个固定字符串
-        # headers = {"Content-Type": "application/json", "Authorization": f"Bearer sk-你的Key"}
-        # payload = {"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": prompt}]}
-        # res = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=10)
-        # return res.json()['choices'][0]['message']['content']
-        
-        # 临时方案：直接复读，防止外部 API 拖垮机器人
-        return "你好！我收到你的消息了：" + prompt[:10] 
-    except Exception as e:
-        return "抱歉，我现在脑子卡壳了。"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LLM_API_KEY}"}
+        payload = {"model": LLM_MODEL, "messages": [{"role": "user", "content": prompt}]}
+        res = requests.post(LLM_API_URL, headers=headers, json=payload, timeout=10)
+        return res.json()['choices'][0]['message']['content']
+    except Exception:
+        return "我在呢！"
 
 def clear_memory():
     gc.collect()
 
-async def run_bot():
-    print("=" * 30)
-    print("机器人启动中...")
-    
-    # 前置检查
-    if not QQ_APPID:
-        print("❌❌❌ 致命错误：环境变量 QQ_APPID 为空！请去 Railway 设置变量！")
-        while True:
-            await asyncio.sleep(3600) # 死循环等待，防止反复重启刷屏
+# 新增：生成正确的鉴权 Token
+def generate_token(app_id, app_secret):
+    # 官方标准格式通常是 Base64 编码的 "AppID:AppSecret"
+    # 但在某些沙箱环境或简易接入中，直接拼接 "QQBot AppID.AppSecret" 也可能有效
+    # 我们先尝试最常用的 Base64 格式
+    auth_str = f"{app_id}:{app_secret}"
+    token = base64.b64encode(auth_str.encode()).decode()
+    return f"QQBot {token}"
 
-    # 这里的 token 格式如果 401，请改成 "Bearer " + QQ_APPID.strip()
-    token = f"QQBot {QQ_APPID.strip()}" 
+async def run_bot():
+    # 修改：使用生成的 Token
+    token = generate_token(QQ_APPID, QQ_APPSECRET)
+    
     headers = {
         "Authorization": token,
-        "X-Union-Appid": QQ_APPID.strip()
+        "X-Union-Appid": QQ_APPID
     }
     
-    # 确认是沙箱环境
     ws_url = "wss://sandbox.api.sgroup.qq.com/websocket"
-    print(f"目标网关: {ws_url}")
-    print(f"使用的Token: {token[:15]}...") # 打印前15位看看对不对
+    print("--- Bot 启动 ---")
+    print(f"使用的 Token: {token[:30]}...") # 打印前30位检查格式
     
     while True:
         try:
+            print(f"连接网关: {ws_url}")
             clear_memory()
             async with aiohttp.ClientSession() as session:
-                print("尝试连接 WebSocket...")
-                async with session.ws_connect(ws_url, headers=headers, heartbeat=30, timeout=10) as ws:
-                    print("✅ WebSocket 物理连接成功！")
-                    
+                async with session.ws_connect(ws_url, headers=headers, heartbeat=30) as ws:
+                    print("WebSocket 已连接")
                     heartbeat_interval = 41250
                     heartbeat_task = None
-
+                    
                     async def send_heartbeat():
+                        nonlocal heartbeat_interval
                         while True:
                             await asyncio.sleep(heartbeat_interval / 1000)
                             try:
@@ -78,20 +76,18 @@ async def run_bot():
 
                             if op == 10:
                                 heartbeat_interval = data["d"]["heartbeat_interval"]
-                                print(f"📡 收到 Hello 包, 心跳间隔: {heartbeat_interval}ms")
+                                print(f"📡 收到 Hello, 心跳间隔: {heartbeat_interval}ms")
                                 
                                 # 发送鉴权
-                                auth_data = {
-                                    "op": 2,
+                                await ws.send_str(json.dumps({
+                                    "op": 2, 
                                     "d": {
-                                        "token": token,
-                                        "intents": (1 << 9) | (1 << 0), # 群@和私聊
+                                        "token": token, 
+                                        "intents": (1 << 9) | (1 << 0), 
                                         "shard": [0, 1]
                                     }
-                                }
-                                print(f"🚀 发送鉴权: {auth_data}")
-                                await ws.send_str(json.dumps(auth_data))
-                                print("✅ 鉴权包已发出，等待服务器回应...")
+                                }))
+                                print("🚀 鉴权已发送")
                                 heartbeat_task = asyncio.create_task(send_heartbeat())
 
                             elif op == 0:
@@ -100,12 +96,11 @@ async def run_bot():
                                 
                                 if t in ("GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"):
                                     content = d.get("content", "").strip()
-                                    user_openid = d.get("author", {}).get("user_openid", "未知用户")
-                                    print(f"💬 收到消息 | 用户: {user_openid} | 内容: {content}")
+                                    msg_id = d.get("id")
+                                    print(f"💬 收到消息: {content[:30]}...")
                                     
                                     reply = call_llm(content)
                                     
-                                    # 简单的发消息逻辑
                                     channel_id = d.get("channel_id", "")
                                     user_openid = d.get("author", {}).get("user_openid", "")
                                     if t == "GROUP_AT_MESSAGE_CREATE":
@@ -113,38 +108,36 @@ async def run_bot():
                                     else:
                                         post_url = f"https://api.sgroup.qq.com/v2/users/@me/channels/{user_openid}/messages"
                                     
-                                    body = {"content": reply}
+                                    body = {"content": reply, "msg_id": msg_id}
                                     try:
                                         async with aiohttp.ClientSession() as s:
-                                            await s.post(post_url, headers=headers, json=body, timeout=10)
-                                            print(f"📤 回复成功")
+                                            async with s.post(post_url, headers=headers, json=body, timeout=10) as r:
+                                                if r.status in (200, 204):
+                                                    print("📤 回复成功")
                                     except Exception as e:
                                         print(f"❌ 回复异常: {e}")
 
                             elif op == 7:
-                                print("⚠️ 服务器要求重连 (Opcode 7)")
+                                print("⚠️ 服务端要求重连")
                                 break
                                 
                             elif op == 9:
-                                # 这是一个关键！Opcode 9 代表鉴权失败或者需要重新鉴权
-                                print(f"❌❌❌ 收到 Opcode 9 (鉴权失败或被踢出)! 数据: {data}")
+                                print(f"❌❌❌ 收到 Opcode 9 (鉴权失败)! 数据: {data}")
+                                # 如果这里报错，说明 Token 格式还是不对，或者沙箱环境没配对
                                 break
 
                         except Exception as loop_err:
-                            print(f"⚠️ 消息处理内部错误: {loop_err}")
-                            # traceback.print_exc() # 调试时可以解开
-
+                            print(f"⚠️ 消息处理异常: {loop_err}")
+                            traceback.print_exc()
+                    
                     if heartbeat_task:
                         heartbeat_task.cancel()
 
         except Exception as outer_err:
-            # 这里是兜底的最外层错误捕获
-            print(f"🔥🔥🔥 发生严重未知错误: {outer_err}")
-            # 打印详细堆栈，这对找 bug 至关重要！
+            print(f"🔥 发生严重错误: {outer_err}")
             traceback.print_exc()
         
-        # 等待 5 秒重连
-        print("连接断开，5秒后进行重连...")
+        print("5秒后尝试重连...")
         await asyncio.sleep(5)
 
 if __name__ == "__main__":
@@ -153,5 +146,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("程序已停止")
     except Exception as e:
-        print(f"启动失败: {e}")
-        traceback.print_exc()
+        print(f"无法运行的错误: {e}")
