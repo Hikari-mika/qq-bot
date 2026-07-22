@@ -74,7 +74,6 @@ async def main():
                         "op": 2,
                         "d": {
                             "token": f"QQBot {token}",
-                            "intents": (1 << 9) | (1 << 15),
                             "shard": [0, 1]
                         }
                     }))
