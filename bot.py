@@ -7,29 +7,41 @@ import gc
 import traceback
 
 QQ_APPID = os.environ.get("QQ_APPID", "1904762056")
-QQ_APPSECRET = os.environ.get("QQ_APPSECRET", "tGe2RqGg7Y0SvPtOuQxV3cCmNzbEsWBq")
+QQ_APPSECRET = os.environ.get("QQ_APPSECRET", "DjGnLtS1bBmO0dGuYDsYEvdL4nXH2njf")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "sk-17e91de636bf49a68eb632cf758fbae1")
 
 LLM_API_URL = "https://api.openai.com/v1/chat/completions"
 LLM_MODEL = "gpt-3.5-turbo"
 
+_cached_token = None
+_cached_expire = 0
+
 def get_qq_bot_token():
+    global _cached_token, _cached_expire
+    import time
+    now = time.time()
+    if _cached_token and now < _cached_expire - 60:
+        return _cached_token
     try:
         print("正在向 QQ 官方请求 Access Token...")
         url = "https://bots.qq.com/app/getAppAccessToken"
         headers = {"Content-Type": "application/json"}
-        payload = {"appId": QQ_APPID, "clientSecret": QQ_APPSECRET}
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        payload = {"appId": str(QQ_APPID), "clientSecret": str(QQ_APPSECRET)}
+        res = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
+        print(f"HTTP 状态码: {res.status_code}")
+        print(f"返回内容: {res.text}")
         data = res.json()
         if data.get("code") == 0:
-            token = data["access_token"]
-            print(f"Token 获取成功: {token[:15]}...")
-            return token
+            _cached_token = data["access_token"]
+            _cached_expire = now + int(data.get("expires_in", 7200))
+            print(f"Token 获取成功: {_cached_token[:15]}...")
+            return _cached_token
         else:
-            print(f"Token 获取失败，官方返回: {data}")
+            print(f"Token 获取失败: code={data.get('code')}, message={data.get('message')}")
             return None
     except Exception as e:
         print(f"请求 Token 时发生异常: {e}")
+        traceback.print_exc()
         return None
 
 def call_llm(prompt):
@@ -47,7 +59,8 @@ def clear_memory():
 async def run_bot():
     token_str = get_qq_bot_token()
     if not token_str:
-        print("无法获取 Token，程序退出")
+        print("无法获取 Token，5秒后重试")
+        await asyncio.sleep(5)
         return
     token = f"QQBot {token_str}"
     headers = {"Authorization": token, "X-Union-Appid": QQ_APPID}
@@ -69,6 +82,7 @@ async def run_bot():
                                 await ws.send_str(json.dumps({"op": 1, "d": None}))
                             except:
                                 break
+                    ready = False
                     async for msg in ws:
                         try:
                             if msg.type != aiohttp.WSMsgType.TEXT:
@@ -84,8 +98,9 @@ async def run_bot():
                                 t = data.get("t")
                                 d = data.get("d", {})
                                 if t == "READY":
-                                    print(f"鉴权成功！机器人已上线！")
+                                    ready = True
                                     heartbeat_task = asyncio.create_task(send_heartbeat())
+                                    print("✅ 鉴权成功，机器人已上线！")
                                 elif t in ("GROUP_AT_MESSAGE_CREATE", "C2C_MESSAGE_CREATE"):
                                     content = d.get("content", "").strip()
                                     print(f"收到消息: {content[:30]}...")
